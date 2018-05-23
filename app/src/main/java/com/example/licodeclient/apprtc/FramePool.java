@@ -64,8 +64,8 @@ class FramePool {
       if (!frames.isEmpty()) {
         dst = frames.pop();
       } else {
-        dst = new I420Frame(
-            source.width, source.height, source.yuvStrides, null);
+        dst = new I420Frame(   //lihengz 2018.3.1
+            source.width, source.height, source.rotationDegree, source.yuvStrides, null,0);
       }
     }
     return dst;

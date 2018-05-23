@@ -34,7 +34,7 @@ import com.example.licodeclient.apprtc.VideoStreamsView;
 public class FragmentVideoChat extends Fragment {
 	// TODO replace this with your servers url!
 	/** server url - where to request tokens */
-	private String mTokenServerUrl = "http://192.168.0.42:3001";
+	private String mTokenServerUrl = "http://47.92.124.64:3001";
 
 	/** the licode signaling engine */
 	VideoConnectorInterface mConnector = null;
@@ -470,7 +470,9 @@ public class FragmentVideoChat extends Fragment {
 				URL url = new URL(params[0] + "/createToken/");
 				String message = "{";
 				message += "\"username\": \"user\", ";
-				message += "\"role\": \"presenter\" ";
+				message += "\"role\": \"presenter\" ,";
+				message += "\"type\": \"erizo\", ";
+				message += "\"room\": \"test\" ";
 				message += " }";
 				conn = (HttpURLConnection) url.openConnection();
 				conn.setRequestMethod("POST");

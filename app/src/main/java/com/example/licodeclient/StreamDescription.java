@@ -93,6 +93,7 @@ public class StreamDescription implements StreamDescriptionInterface {
 			mAttributes = attr;
 		}
 		mNick = nick;
+		mLocal = true; //lihengz
 	}
 
 	/*
@@ -179,11 +180,12 @@ public class StreamDescription implements StreamDescriptionInterface {
 			result.put("data", mData);
 			result.put("audio", mAudio);
 			result.put("video", mVideo);
+			result.put("minVideoBW",0);
 			if (mAttributes == null) {
 				mAttributes = new JSONObject();
 			}
 			mAttributes.put("nick", mNick);
-			result.put("attributes", mAttributes);
+			//result.put("attributes", mAttributes);
 		} catch (JSONException jex) {
 			// TODO
 			jex.printStackTrace();

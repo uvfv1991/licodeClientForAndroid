@@ -1,6 +1,8 @@
 package com.example.licodeclient;
 
 import java.io.UnsupportedEncodingException;
+import java.net.URISyntaxException;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
@@ -21,6 +23,7 @@ import org.webrtc.PeerConnection.IceConnectionState;
 import org.webrtc.PeerConnection.IceGatheringState;
 import org.webrtc.PeerConnection.SignalingState;
 import org.webrtc.PeerConnectionFactory;
+import org.webrtc.RtpReceiver;
 import org.webrtc.SdpObserver;
 import org.webrtc.SessionDescription;
 import org.webrtc.SessionDescription.Type;
@@ -34,23 +37,46 @@ import android.app.Activity;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.util.Base64;
+import android.util.Log;
+import org.webrtc.Camera1Enumerator;
+import org.webrtc.Camera2Enumerator;
+import org.webrtc.CameraEnumerator;
 
 import com.example.licodeclient.apprtc.VideoStreamsView;
-import com.koushikdutta.async.http.AsyncHttpClient;
-import com.koushikdutta.async.http.socketio.Acknowledge;
-import com.koushikdutta.async.http.socketio.ConnectCallback;
-import com.koushikdutta.async.http.socketio.EventCallback;
-import com.koushikdutta.async.http.socketio.SocketIOClient;
+//import com.koushikdutta.async.http.AsyncHttpClient;
+//import com.koushikdutta.async.http.socketio.Acknowledge;
+//import com.koushikdutta.async.http.socketio.ConnectCallback;
+//import com.koushikdutta.async.http.socketio.EventCallback;
+//import com.koushikdutta.async.http.socketio.SocketIOClient;
+import java.security.cert.CertificateException;
+import java.security.cert.X509Certificate;
+
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
+import io.socket.client.IO;
+import io.socket.client.Socket;
+import io.socket.client.Ack;
+import io.socket.emitter.Emitter;
+import okhttp3.OkHttpClient;
 
 /**
  * A simple class to connect to a licode server and provides callbacks for the
  * standard events associated with this.
  */
 public class LicodeConnector implements VideoConnectorInterface {
+	private static final String VIDEO_VP8_INTEL_HW_ENCODER_FIELDTRIAL = "WebRTC-IntelVP8/Enabled/";
+	private static final String VIDEO_H264_HIGH_PROFILE_FIELDTRIAL =
+			"WebRTC-H264HighProfile/Enabled/";
+
 	/** flag to store if basic initialization has happened */
 	private static boolean sInitializedAndroidGlobals;
 	/** socket.io client */
-	volatile SocketIOClient mIoClient = null;
+	//volatile SocketIOClient mIoClient = null;
+	Socket mIoClient = null;
 	/** lock object for socket communication */
 	private Object mSocketLock = new Object();
 	/** current state of the connection */
@@ -105,44 +131,79 @@ public class LicodeConnector implements VideoConnectorInterface {
 		System.out.println(s);
 	}
 
-	EventCallback mOnAddStream = new EventCallback() {
+	Emitter.Listener mOnAddStream = new Emitter.Listener() {
 		@Override
-		public void onEvent(JSONArray args, Acknowledge ack) {
-			// [{"data":true,"id":331051653483882560,"screen":"","audio":true,"video":true}]
+		public void call(Object... args) {
+			// ["onAddStream",{"id":473147868193668100,"audio":true,"video":true,"data":true,"screen":""}]
 			log("mOnAddStream");
 
 			try {
-				StreamDescription stream = StreamDescription.parseJson(args
-						.getJSONObject(0));
+				StreamDescription stream = StreamDescription.parseJson((JSONObject)args[0]);
 
 				boolean isLocal = mLocalStream.get(stream.getId()) != null;
 				if (!isLocal) {
 					mRemoteStream.put(stream.getId(), stream);
 					triggerStreamAdded(stream);
 				}
-			} catch (JSONException e) {
+			} catch (Exception e) {
 			}
 		}
 	};
-	EventCallback mOnSubscribeP2P = new EventCallback() {
+
+	Emitter.Listener mOnSocketSignalingMessage = new Emitter.Listener() {
 		@Override
-		public void onEvent(JSONArray args, Acknowledge ack) {
+		public void call(Object... args) {
+			// ["onAddStream",{"id":473147868193668100,"audio":true,"video":true,"data":true,"screen":""}]
+			log("mOnSocketSignalingMessage args:"+args.toString());
+
+			try {
+				JSONObject msg = (JSONObject)args[0];
+				JSONObject body = msg.getJSONObject("mess");
+				String type = body.getString("type");
+				if(type.equalsIgnoreCase("answer")) {
+					if(msg.has("streamId")) {
+						SessionDescription remoteSdp = new SessionDescription(Type.ANSWER,
+								body.getString("sdp"));
+						final StreamDescription stream = mLocalStream.get(msg.getString("streamId"));
+						if(stream!=null) {
+							final SessionDescription finalRemoteSdp = remoteSdp;
+							mActivity.runOnUiThread(new Runnable() {
+								@Override
+								public void run() {
+									stream.pc.setRemoteDescription(
+											null, finalRemoteSdp);
+								}
+							});
+						}
+					}
+				}
+
+
+
+			} catch (Exception e) {
+			}
+		}
+	};
+
+	Emitter.Listener mOnSubscribeP2P = new Emitter.Listener() {
+		@Override
+		public void call(Object... args) {
 			// not yet relevant
 		}
 	};
-	EventCallback mOnPublishP2P = new EventCallback() {
+	Emitter.Listener mOnPublishP2P = new Emitter.Listener() {
 		@Override
-		public void onEvent(JSONArray args, Acknowledge ack) {
+		public void call(Object... args) {
 			// not yet relevant
 		}
 	};
-	EventCallback mOnDataStream = new EventCallback() {
+	Emitter.Listener mOnDataStream = new Emitter.Listener() {
 		@Override
-		public void onEvent(JSONArray args, Acknowledge ack) {
+		public void call(Object... args) {
 			log("mOnDataStream");
 
 			try {
-				JSONObject param = args.getJSONObject(0);
+				JSONObject param = (JSONObject)args[0];
 				String streamId = param.getString("id");
 				String message = param.getString("msg");
 				StreamDescriptionInterface stream = mRemoteStream.get(streamId);
@@ -153,14 +214,14 @@ public class LicodeConnector implements VideoConnectorInterface {
 			}
 		}
 	};
-	EventCallback mOnRemoveStream = new EventCallback() {
+	Emitter.Listener mOnRemoveStream = new Emitter.Listener() {
 		@Override
-		public void onEvent(JSONArray args, Acknowledge ack) {
+		public void call(Object... args) {
 			// [{"id":331051653483882560}]
 			log("mOnRemoveStream");
 
 			try {
-				JSONObject param = args.getJSONObject(0);
+				JSONObject param = (JSONObject)args[0];
 				String streamId = param.getString("id");
 				StreamDescription stream = (StreamDescription) mRemoteStream
 						.get(streamId);
@@ -174,11 +235,19 @@ public class LicodeConnector implements VideoConnectorInterface {
 			}
 		}
 	};
-	EventCallback mDisconnect = new EventCallback() {
+	Emitter.Listener mDisconnect = new Emitter.Listener() {
 		@Override
-		public void onEvent(JSONArray args, Acknowledge ack) {
+		public void call(Object... args) {
 			log("mDisconnect");
 			disconnect();
+		}
+	};
+
+	Emitter.Listener mConnectError = new Emitter.Listener() {
+		@Override
+		public void call(final Object... args) {
+			log("Error connecting "+args);
+
 		}
 	};
 
@@ -220,13 +289,38 @@ public class LicodeConnector implements VideoConnectorInterface {
 		}
 
 		@Override
-		public void onIceCandidate(IceCandidate iceCandidate) {
+		public void onIceCandidate(final IceCandidate iceCandidate) {
+			mActivity.runOnUiThread(new Runnable() {
+				@Override
+				public void run() {
+					StreamDescription stream =(StreamDescription) mDesc;
+
+					JSONObject desc = new JSONObject();
+					//JSONObject candidate = new JSONObject();
+					JSONObject p1 = new JSONObject();
+					JSONObject p2 = new JSONObject();
+					try {
+						desc.put("streamId",stream.getId());
+
+						final IceCandidate finalIceCandidate = iceCandidate;
+						p2.put("sdpMLineIndex",finalIceCandidate.sdpMLineIndex);
+						p2.put("sdpMid",finalIceCandidate.sdpMid);
+						p2.put("candidate","a="+finalIceCandidate.sdp);
+						p1.put("type", "candidate");
+						p1.put("candidate", p2);
+						desc.put("msg", p1);
+					} catch (JSONException e) {
+					}
+
+					sendMessageSocketWithNull("signaling_message", desc, null);
+				}
+			});
 		}
 
-		@Override
+		/*@Override
 		public void onError() {
 			log("PeerConenctionObserver.onError");
-		}
+		}*/
 
 		@Override
 		public void onDataChannel(DataChannel arg0) {
@@ -248,6 +342,20 @@ public class LicodeConnector implements VideoConnectorInterface {
 		public void onRenegotiationNeeded() {
 			log("PeerConnectionObserver.onRenegotiationNeeded");
 		}
+
+		@Override
+		public void onIceCandidatesRemoved(final IceCandidate[] candidates) {  //lihengz
+
+		}
+
+		@Override
+		public void onIceConnectionReceivingChange(boolean receiving) {
+
+		}
+
+		@Override
+		public void onAddTrack(final RtpReceiver receiver, final MediaStream[] mediaStreams) { //lihengz
+		}
 	};
 
 	/** context/activity */
@@ -265,8 +373,11 @@ public class LicodeConnector implements VideoConnectorInterface {
 		sVcHandler.post(new Runnable() {
 			@Override
 			public void run() {
-				if (mVideoSource != null) {
-					mVideoSource.stop();
+				if (mVideoCapturer != null) {
+					try {
+						mVideoCapturer.stopCapture();  //lihengz
+					} catch (InterruptedException e) {
+					}
 					mVideoStopped = true;
 				}
 			}
@@ -279,7 +390,7 @@ public class LicodeConnector implements VideoConnectorInterface {
 			@Override
 			public void run() {
 				if (mVideoSource != null && mVideoStopped) {
-					mVideoSource.restart();
+					//mVideoSource.restart();  //lihengz
 					mVideoStopped = false;
 				}
 			}
@@ -320,9 +431,21 @@ public class LicodeConnector implements VideoConnectorInterface {
 				if (!sInitializedAndroidGlobals) {
 					sInitializedAndroidGlobals = true;
 					// newer libjingle versions have options for video and audio
-					PeerConnectionFactory.initializeAndroidGlobals(mActivity);// ,
+					//PeerConnectionFactory.initializeAndroidGlobals(mActivity);// ,
 																				// true,
 																				// true);
+					// Initialize field trials.
+					String fieldTrials = "";
+					//fieldTrials += VIDEO_FLEXFEC_FIELDTRIAL;
+					fieldTrials += VIDEO_VP8_INTEL_HW_ENCODER_FIELDTRIAL;
+					//fieldTrials += VIDEO_FRAME_EMIT_FIELDTRIAL;
+					fieldTrials += VIDEO_H264_HIGH_PROFILE_FIELDTRIAL;
+					PeerConnectionFactory.initialize( //lihengz
+							PeerConnectionFactory.InitializationOptions.builder(mActivity)
+									.setFieldTrials(fieldTrials)
+									.setEnableVideoHwAcceleration(true)
+									.setEnableInternalTracer(true)
+									.createInitializationOptions());
 				}
 
 				if (sFactory == null) {
@@ -360,13 +483,14 @@ public class LicodeConnector implements VideoConnectorInterface {
 	}
 
 	/** sends a token - when required */
+
 	public void refreshVideoToken(String token) {
 		token = LicodeConnector.decodeToken(token);
 		if (token == null) {
 			return;
 		}
 
-		try {
+		/*try {
 			JSONObject jsonToken = new JSONObject(token);
 			handleTokenRefresh(jsonToken);
 
@@ -385,7 +509,7 @@ public class LicodeConnector implements VideoConnectorInterface {
 				}
 			});
 		} catch (JSONException e) {
-		}
+		}*/
 	}
 
 	@Override
@@ -493,6 +617,32 @@ public class LicodeConnector implements VideoConnectorInterface {
 		return null;
 	}
 
+	/**
+	 * 覆盖java默认的证书验证
+	 */
+	private static final TrustManager[] trustAllCerts = new TrustManager[]{new X509TrustManager() {
+		public java.security.cert.X509Certificate[] getAcceptedIssuers() {
+			return new java.security.cert.X509Certificate[]{};
+		}
+
+		public void checkClientTrusted(X509Certificate[] chain, String authType)
+				throws CertificateException {
+		}
+
+		public void checkServerTrusted(X509Certificate[] chain, String authType)
+				throws CertificateException {
+		}
+	}};
+
+	/**
+	 * 设置不验证主机
+	 */
+	private static final HostnameVerifier DO_NOT_VERIFY = new HostnameVerifier() {
+		public boolean verify(String hostname, SSLSession session) {
+			return true;
+		}
+	};
+
 	/** called with the connection token */
 	void createToken(String result) {
 		if (result == null) {
@@ -508,173 +658,201 @@ public class LicodeConnector implements VideoConnectorInterface {
 			final JSONObject jsonToken = new JSONObject(token);
 			String host = jsonToken.getString("host");
 			if (!host.startsWith("http://")) {
-				host = "http://" + host;
+				host = "https://" + host;
 			}
-			handleTokenRefresh(jsonToken);
-			SocketIOClient.connect(AsyncHttpClient.getDefaultInstance(), host,
-					new ConnectCallback() {
-						@Override
-						public void onConnectCompleted(Exception err,
-								SocketIOClient client) {
-							if (err != null) {
-								err.printStackTrace();
-								return;
-							}
+			//handleTokenRefresh(jsonToken); lihengz
+			SSLContext sc = SSLContext.getInstance("TLS");
+			sc.init(null, trustAllCerts, new java.security.SecureRandom());
+			OkHttpClient okHttpClient = new OkHttpClient.Builder()
+					.hostnameVerifier(DO_NOT_VERIFY)
+					.sslSocketFactory(sc.getSocketFactory(), (X509TrustManager)trustAllCerts[0])
+					.build();
 
-							try {
-								// workaround - 2nd connection event
-								JSONObject jsonParam = new JSONObject();
-								jsonParam.put("reconnect", false);
-								jsonParam.put("secure",
-										jsonToken.getBoolean("secure"));
-								jsonParam.put("force new connection", true);
+			// default settings for all sockets
+			IO.setDefaultOkHttpWebSocketFactory(okHttpClient);
+			IO.setDefaultOkHttpCallFactory(okHttpClient);
 
-								JSONArray arg = new JSONArray();
-								arg.put(jsonParam);
-								client.emit("connection", arg);
-								log("Licode: Connection established!");
-							} catch (JSONException e) {
-								e.printStackTrace();
-							}
-							synchronized (mSocketLock) {
-								mIoClient = client;
-								client.on("onAddStream", mOnAddStream);
-								client.on("onSubscribeP2P", mOnSubscribeP2P);
-								client.on("onPublishP2P", mOnPublishP2P);
-								client.on("onDataStream", mOnDataStream);
-								client.on("onRemoveStream", mOnRemoveStream);
-								client.on("disconnect", mDisconnect);
-							}
+			// set as an option
+			IO.Options opts = new IO.Options();
+			opts.callFactory = okHttpClient;
+			opts.webSocketFactory = okHttpClient;
+			opts.transports = new String[]{"websocket"}; //lihengz
 
-							sendMessageSocket("token", jsonToken,
-									new Acknowledge() {
-										@Override
-										public void acknowledge(JSONArray result) {
-											log("Licode: createToken -> connect");
-											log(result.toString());
-											try {
-												// ["success",{"maxVideoBW":300,"id":"5384684c918b864466c853d6","streams":[],"defaultVideoBW":300,"turnServer":{"password":"","username":"","url":""},"stunServerUrl":"stun:stun.l.google.com:19302"}]
-												// ["success",{"maxVideoBW":300,"id":"5384684c918b864466c853d6","streams":[{"data":true,"id":897203996079042600,"screen":"","audio":true,"video":true},{"data":true,"id":841680482029914900,"screen":"","audio":true,"video":true}],"defaultVideoBW":300,"turnServer":{"password":"","username":"","url":""},"stunServerUrl":"stun:stun.l.google.com:19302"}]
-												if ("success"
-														.equalsIgnoreCase(result
-																.getString(0)) == false) {
-													return;
-												}
+			synchronized (mSocketLock) {
+				mIoClient = IO.socket(host, opts);
+				//mIoClient.on(Socket.EVENT_CONNECT, onConnect);
+				mIoClient.on(Socket.EVENT_DISCONNECT, mDisconnect);
+				mIoClient.on(Socket.EVENT_CONNECT_ERROR, mConnectError);
+				mIoClient.on(Socket.EVENT_CONNECT_TIMEOUT, mConnectError);
+				mIoClient.on("onAddStream", mOnAddStream);
+				mIoClient.on("onSubscribeP2P", mOnSubscribeP2P);
+				mIoClient.on("onPublishP2P", mOnPublishP2P);
+				mIoClient.on("onDataStream", mOnDataStream);
+				mIoClient.on("onRemoveStream", mOnRemoveStream);
+				mIoClient.on("signaling_message_erizo", mOnSocketSignalingMessage);
+				mIoClient.on("disconnect", mDisconnect);
+			}
 
-												JSONObject jsonObject = result
-														.getJSONObject(1);
-												parseVideoTokenResponse(result);
+			mIoClient.on(Socket.EVENT_CONNECT, new Emitter.Listener() {
 
-												if (jsonObject
-														.has("turnServer")) {
-													mTurnServer = jsonObject
-															.getJSONObject("turnServer");
-													String url = mTurnServer
-															.getString("url");
-													String usr = mTurnServer
-															.getString("username");
-													String pwd = mTurnServer
-															.getString("password");
-													if (!url.isEmpty()) {
-														mIceServers
-																.add(new PeerConnection.IceServer(
-																		url,
-																		usr,
-																		pwd));
-													}
-												}
-												if (jsonObject
-														.has("stunServerUrl")) {
-													mStunServerUrl = jsonObject
-															.getString("stunServerUrl");
-													if (!mStunServerUrl
-															.isEmpty()) {
-														mIceServers
-																.add(new PeerConnection.IceServer(
-																		mStunServerUrl));
-													}
-												}
-												if (jsonObject
-														.has("defaultVideoBW")) {
-													mDefaultVideoBW = jsonObject
-															.getInt("defaultVideoBW");
-												}
-												if (jsonObject
-														.has("maxVideoBW")) {
-													mMaxVideoBW = jsonObject
-															.getInt("maxVideoBW");
-												}
+				@Override
+				public void call(Object... args) {
+					sendMessageSocket("token", jsonToken,
+							new Ack() {
+								@Override
+								public void call(Object... args) {
+									log("Licode: createToken -> connect");
+									log(args.toString());
+									String result = (String)args[0];
+									try {
+										// ["success",{"maxVideoBW":300,"id":"5384684c918b864466c853d6","streams":[],"defaultVideoBW":300,"turnServer":{"password":"","username":"","url":""},"stunServerUrl":"stun:stun.l.google.com:19302"}]
+										// ["success",{"maxVideoBW":300,"id":"5384684c918b864466c853d6","streams":[{"data":true,"id":897203996079042600,"screen":"","audio":true,"video":true},{"data":true,"id":841680482029914900,"screen":"","audio":true,"video":true}],"defaultVideoBW":300,"turnServer":{"password":"","username":"","url":""},"stunServerUrl":"stun:stun.l.google.com:19302"}]
+										if ("success"
+												.equalsIgnoreCase(result) == false) {
+											return;
+										}
 
-												mState = State.kConnected;
+										JSONObject jsonObject = (JSONObject)args[1];
+										parseVideoTokenResponse(jsonObject);
 
-												// update room id
-												mRoomId = jsonObject
-														.getString("id");
-
-												for (RoomObserver obs : mObservers) {
-													obs.onRoomConnected(mRemoteStream);
-												}
-
-												// retrieve list of streams
-												JSONArray streams = jsonObject
-														.getJSONArray("streams");
-												for (int index = 0, n = streams
-														.length(); index < n; ++index) {
-													// {"data":true,"id":897203996079042600,"screen":"","audio":true,"video":true}
-													JSONObject arg = streams
-															.getJSONObject(index);
-													StreamDescription stream = StreamDescription
-															.parseJson(arg);
-													mRemoteStream.put(
-															stream.getId(),
-															stream);
-													triggerStreamAdded(stream);
-												}
-											} catch (JSONException e) {
+										if (jsonObject
+												.has("turnServer")) { //todo lihengz
+											mTurnServer = jsonObject
+													.getJSONObject("turnServer");
+											String url = mTurnServer
+													.getString("url");
+											String usr = mTurnServer
+													.getString("username");
+											String pwd = mTurnServer
+													.getString("password");
+											if (!url.isEmpty()) {
+												mIceServers
+														.add(new PeerConnection.IceServer(
+																url,
+																usr,
+																pwd));
 											}
 										}
-									});
-						}
-					});
+										if (jsonObject
+												.has("stunServerUrl")) { //todo lihengz
+											mStunServerUrl = jsonObject
+													.getString("stunServerUrl");
+											if (!mStunServerUrl
+													.isEmpty()) {
+												mIceServers
+														.add(new PeerConnection.IceServer(
+																mStunServerUrl));
+											}
+										}
+										if (jsonObject
+												.has("defaultVideoBW")) {
+											mDefaultVideoBW = jsonObject
+													.getInt("defaultVideoBW");
+										}
+										if (jsonObject
+												.has("maxVideoBW")) {
+											mMaxVideoBW = jsonObject
+													.getInt("maxVideoBW");
+										}
+
+										mState = State.kConnected;
+
+										// update room id
+										mRoomId = jsonObject
+												.getString("id");
+
+										for (RoomObserver obs : mObservers) {
+											obs.onRoomConnected(mRemoteStream);
+										}
+
+										// retrieve list of streams
+										JSONArray streams = jsonObject
+												.getJSONArray("streams");
+										for (int index = 0, n = streams
+												.length(); index < n; ++index) {
+											// {"data":true,"id":897203996079042600,"screen":"","audio":true,"video":true}
+											JSONObject arg = streams
+													.getJSONObject(index);
+											StreamDescription stream = StreamDescription
+													.parseJson(arg);
+											mRemoteStream.put(
+													stream.getId(),
+													stream);
+											triggerStreamAdded(stream);
+										}
+									} catch (JSONException e) {
+									}
+								}
+							});
+				}
+
+			});
+			mIoClient.connect();
+
+
 		} catch (JSONException e) {
+		} catch (URISyntaxException e) {
+			e.printStackTrace();
+		} catch (Exception e) {
+			e.printStackTrace();
 		}
 	}
 
 	/** send a json something on the specified channel via socket.io */
-	void sendMessageSocket(String channel, Object param, Acknowledge ack) {
+	void sendMessageSocket(String channel, Object param, Ack ack) {
 		synchronized (mSocketLock) {
 			if (mIoClient == null) {
 				return;
 			}
-			JSONArray jsonArgs = new JSONArray();
-			jsonArgs.put(param);
+			//JSONArray jsonArgs = new JSONArray();
+			//jsonArgs.put(param);
 			if (ack == null) {
-				ack = new Acknowledge() {
+				ack = new Ack() {
 					@Override
-					public void acknowledge(JSONArray arg0) {
+					public void call(Object... args) {
 						log("LicodeConnector: No one interested in response: "
-								+ arg0.toString());
+								+ args.toString());
 					}
 				};
 			}
-			mIoClient.emit(channel, jsonArgs, ack);
+			mIoClient.emit(channel, param, ack);
+		}
+	}
+
+	void sendMessageSocketWithNull(String channel, Object param, Ack ack) {  //lihengz 2018.2.22
+		synchronized (mSocketLock) {
+			if (mIoClient == null) {
+				return;
+			}
+			//JSONArray jsonArgs = new JSONArray();
+			//jsonArgs.put(param);
+			if (ack == null) {
+				ack = new Ack() {
+					@Override
+					public void call(Object... args) {
+						log("LicodeConnector: No one interested in response: "
+								+ args.toString());
+					}
+				};
+			}
+			mIoClient.emit(channel, param, null, ack);
 		}
 	}
 
 	void sendSDPSocket(String type, JSONObject param0, JSONObject param1,
-			Acknowledge ack) {
+			Ack ack) {
 		synchronized (mSocketLock) {
 			if (mIoClient == null) {
 				return;
 			}
-			JSONArray jsonArgs = new JSONArray();
-			jsonArgs.put(param0);
-			jsonArgs.put(param1);
-			mIoClient.emit(type, jsonArgs, ack);
+			//JSONArray jsonArgs = new JSONArray();
+			//jsonArgs.put(param0);
+			//jsonArgs.put(param1);
+			mIoClient.emit(type, param0, param1, null, ack);
 		}
 	}
 
-	void sendSDPSocket(String type, JSONArray params, Acknowledge ack) {
+	void sendSDPSocket(String type, JSONArray params, Ack ack) {
 		synchronized (mSocketLock) {
 			if (mIoClient == null) {
 				return;
@@ -728,9 +906,46 @@ public class LicodeConnector implements VideoConnectorInterface {
 		mObservers.remove(observer);
 	}
 
+
+	private boolean useCamera2() {
+		return Camera2Enumerator.isSupported(mActivity);
+	}
+
+	private VideoCapturer createCameraCapturer(CameraEnumerator enumerator) {
+		final String[] deviceNames = enumerator.getDeviceNames();
+
+		// First, try to find front facing camera
+		log( "Looking for front facing cameras.");
+		for (String deviceName : deviceNames) {
+			if (enumerator.isFrontFacing(deviceName)) {
+				log( "Creating front facing camera capturer.");
+				VideoCapturer videoCapturer = enumerator.createCapturer(deviceName, null);
+
+				if (videoCapturer != null) {
+					return videoCapturer;
+				}
+			}
+		}
+
+		// Front facing camera not found, try something else
+		log( "Looking for other cameras.");
+		for (String deviceName : deviceNames) {
+			if (!enumerator.isFrontFacing(deviceName)) {
+				log( "Creating other camera capturer.");
+				VideoCapturer videoCapturer = enumerator.createCapturer(deviceName, null);
+
+				if (videoCapturer != null) {
+					return videoCapturer;
+				}
+			}
+		}
+
+		return null;
+	}
+
 	/** get access to the camera */
 	private VideoCapturer getVideoCapturer() {
-		String[] cameraFacing = { "front", "back" };
+		/*String[] cameraFacing = { "front", "back" };
 		int[] cameraIndex = { 0, 1 };
 		int[] cameraOrientation = { 0, 90, 180, 270 };
 		for (String facing : cameraFacing) {
@@ -746,7 +961,20 @@ public class LicodeConnector implements VideoConnectorInterface {
 				}
 			}
 		}
-		throw new RuntimeException("Failed to open capturer");
+		throw new RuntimeException("Failed to open capturer");*/
+		final VideoCapturer videoCapturer;
+		if (useCamera2()) {
+			log( "Creating capturer using camera2 API.");
+			videoCapturer = createCameraCapturer(new Camera2Enumerator(mActivity));
+		} else {
+			log( "Creating capturer using camera1 API.");
+			videoCapturer = createCameraCapturer(new Camera1Enumerator(true));
+		}
+		if (videoCapturer == null) {
+			log("Failed to open camera");
+			return null;
+		}
+		return videoCapturer;
 	}
 
 	// Implementation detail: bridge the VideoRenderer.Callbacks interface to
@@ -761,14 +989,14 @@ public class LicodeConnector implements VideoConnectorInterface {
 			this.streamId = streamId;
 		}
 
-		@Override
+		/* @Override   lihengz
 		public void setSize(final int width, final int height) {
 			view.queueEvent(new Runnable() {
 				public void run() {
 					view.setSize(streamId, width, height);
 				}
 			});
-		}
+		}*/
 
 		@Override
 		public void renderFrame(I420Frame frame) {
@@ -796,7 +1024,7 @@ public class LicodeConnector implements VideoConnectorInterface {
 		LicodeSdpObserver(StreamDescription stream, boolean publishing) {
 			mStream = stream;
 			mIsPublish = publishing;
-			mSignalChannel = mIsPublish ? "publish" : "subscribe";
+			mSignalChannel = "signaling_message";//mIsPublish ? "publish" : "subscribe";
 		}
 
 		public boolean isLocal() {
@@ -893,34 +1121,25 @@ public class LicodeConnector implements VideoConnectorInterface {
 		}
 
 		void sendLocalDescription() {
-			JSONObject desc = null;
-			if (mIsPublish) {
-				desc = mStream.toJsonOffer("offer");
-			} else {
-				desc = mStream.toJsonOffer(null);
-				try {
-					desc.put("streamId", mStream.getId());
-				} catch (JSONException e) {
-				}
-			}
-			JSONObject p1 = new JSONObject();
+			JSONObject desc = new JSONObject();
+			JSONObject sdp = new JSONObject();
+			//JSONObject p1 = new JSONObject();
 			try {
-				p1.put("messageType", "OFFER");
-				p1.put("sdp", mLocalSdp.description);
-				p1.put("tiebreaker",
-						(int) (Math.random() * (Integer.MAX_VALUE - 2)) + 1);
-				p1.put("offererSessionId", mOffererSessionId); // hardcoded in
-																// Licode?
-				p1.put("seq", 1); // should not be hardcoded, but works for now
+				desc.put("streamId",mStream.getId());
+
+				sdp.put("type", "offer");
+				sdp.put("sdp", mLocalSdp.description);
+				desc.put("msg", sdp);
 			} catch (JSONException e) {
 			}
 			log("SdpObserver#sendLocalDescription; to: " + mSignalChannel
-					+ "; msg: " + p1.toString());
-			sendSDPSocket(mSignalChannel, desc, p1, new Acknowledge() {
+					+ "; msg: " + sdp.toString());
+			sendMessageSocketWithNull("signaling_message", desc, null);
+			/*{
 				@Override
-				public void acknowledge(JSONArray arg0) {
+				public void call(Object... args) {
 					log("SdpObserver#sendLocalDescription#sendSDPSocket#Acknowledge: "
-							+ arg0.toString());
+							+ args.toString());
 
 					String streamId = null;
 					SessionDescription remoteSdp = null;
@@ -929,7 +1148,7 @@ public class LicodeConnector implements VideoConnectorInterface {
 						// JSONObject jsonAnswer = arg0.getJSONObject(0);
 						// licode server sends answer as string which is
 						// basically a json string, though
-						JSONObject jsonAnswer = new JSONObject(arg0
+						JSONObject jsonAnswer = new JSONObject(((JSONArray)args[0])
 								.getString(0));
 						boolean answer = "ANSWER".equals(jsonAnswer
 								.getString("messageType"));
@@ -941,7 +1160,7 @@ public class LicodeConnector implements VideoConnectorInterface {
 								jsonAnswer.getString("sdp"));
 
 						if (mIsPublish) {
-							streamId = arg0.getString(1);
+							streamId = ((JSONArray)args[0]).getString(1);
 						}
 
 						mAnswererSessionId = jsonAnswer
@@ -963,7 +1182,7 @@ public class LicodeConnector implements VideoConnectorInterface {
 						}
 					});
 				}
-			});
+			});*/
 		}
 
 		void sendConfirmation() {
@@ -995,17 +1214,35 @@ public class LicodeConnector implements VideoConnectorInterface {
 	@Override
 	public void publish(final VideoStreamsView view) {
 		if (mPermissionPublish) {
-			sVcHandler.post(new Runnable() {
-				@Override
-				public void run() {
-					doPublish(view);
-				}
-			});
+			final StreamDescription stream = new StreamDescription("", false, true, true,
+					false, null, mNick);
+			JSONObject desc = stream.toJsonOffer("erizo");
+			//JSONArray jsonArgs = new JSONArray();
+			//jsonArgs.put(desc);
+			//jsonArgs.put(null);
+
+			sendMessageSocketWithNull("publish", desc, new Ack() {
+						@Override
+						public void call(Object... args) {
+							//log("publish ack:" + args.toString());
+
+							String streamId = args[0].toString();
+							stream.setId(streamId);
+							mLocalStream.put(streamId, stream);
+
+							sVcHandler.post(new Runnable() {
+								@Override
+								public void run() {
+									doPublish(view, stream);
+								}
+							});
+						}
+					});
 		}
 	}
 
 	/** begin streaming to server - MUST run on VcThread */
-	void doPublish(VideoStreamsView view) {
+	void doPublish(VideoStreamsView view, StreamDescription stream) {
 		if (mVideoCapturer != null) {
 			return;
 		}
@@ -1026,8 +1263,8 @@ public class LicodeConnector implements VideoConnectorInterface {
 
 		if (videoConstraints != null) {
 			mVideoCapturer = getVideoCapturer();
-			mVideoSource = sFactory.createVideoSource(mVideoCapturer,
-					videoConstraints);
+			mVideoCapturer.startCapture(640,480,30);  //lihengz
+			mVideoSource = sFactory.createVideoSource(mVideoCapturer);
 			VideoTrack videoTrack = sFactory.createVideoTrack("ARDAMSv0",
 					mVideoSource);
 			lMS.addTrack(videoTrack);
@@ -1039,15 +1276,15 @@ public class LicodeConnector implements VideoConnectorInterface {
 			audioTrack.setEnabled(false);
 		}
 
-		StreamDescription stream = new StreamDescription("", false, true, true,
-				false, null, mNick);
+		//StreamDescription stream = new StreamDescription("", false, true, true,
+		//		false, null, mNick);
 		MediaConstraints pcConstraints = makePcConstraints();
 		MyPcObserver pcObs = new MyPcObserver(new LicodeSdpObserver(stream,
 				true), stream);
 
 		PeerConnection pc = sFactory.createPeerConnection(mIceServers,
 				pcConstraints, pcObs);
-		pc.addStream(lMS, new MediaConstraints());
+		pc.addStream(lMS);
 
 		stream.setMedia(lMS);
 		if (view != null) {
@@ -1094,20 +1331,20 @@ public class LicodeConnector implements VideoConnectorInterface {
 
 		lMS = null;
 		mVideoCapturer = null;
-		if (mVideoSource != null && !mVideoStopped) {
+		/*if (mVideoSource != null && !mVideoStopped) {
 			mVideoSource.stop();
-		}
+		}*/
 		mVideoSource = null;
 	}
 
 	@Override
 	public void subscribe(final StreamDescriptionInterface stream) {
-		sVcHandler.post(new Runnable() {
+		/*sVcHandler.post(new Runnable() {
 			@Override
 			public void run() {
 				doSubscribe((StreamDescription) stream);
 			}
-		});
+		});*/
 	}
 
 	void doSubscribe(final StreamDescription stream) {
@@ -1317,17 +1554,17 @@ public class LicodeConnector implements VideoConnectorInterface {
 	 * parse an acknowledge to a token sent, analyze for permissions, disconnect
 	 * on error
 	 */
-	protected void parseVideoTokenResponse(JSONArray arg) {
+	protected void parseVideoTokenResponse(JSONObject arg) {
 		// TODO dk: parse all the other things that come with the response? TURN
 		// Server, etc?
 		boolean success = false;
 		String message = "";
 		try {
-			success = "success".equalsIgnoreCase(arg.getString(0));
+			success = true;//"success".equalsIgnoreCase(arg.getString(0));
 			if (success) {
-				JSONObject obj = arg.getJSONObject(1);
-				boolean subscribe = false;
-				boolean publish = false;
+				JSONObject obj = arg;//arg.getJSONObject(1);
+				boolean subscribe = true;//false;
+				boolean publish = true; //false;
 				if (obj.has("permissions")) {
 					JSONObject permissions = obj.getJSONObject("permissions");
 					subscribe = permissions.has("subscribe")
@@ -1338,7 +1575,7 @@ public class LicodeConnector implements VideoConnectorInterface {
 				mPermissionSubscribe = subscribe;
 				mPermissionPublish = publish;
 			} else {
-				message = arg.get(1).toString();
+				message = arg.toString();
 			}
 		} catch (JSONException e) {
 			log(e.getMessage());

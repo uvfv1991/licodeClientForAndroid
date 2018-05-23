@@ -146,8 +146,8 @@ public class VideoStreamsView extends GLSurfaceView implements
 			if (desc != null && desc.bufferIndex != -1) {
 				I420Frame frameToDrop = desc.frameToRender;
 				if (desc.bufferIndex != -1) {
-					final I420Frame frameCopy = framePool.takeFrame(frame)
-							.copyFrom(frame);
+					final I420Frame frameCopy = framePool.takeFrame(frame); //lihengz 2018.3.1
+							//.copyFrom(frame);
 					desc.frameToRender = frameCopy;
 				}
 				if (frameToDrop != null) {
